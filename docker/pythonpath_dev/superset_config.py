@@ -99,7 +99,7 @@ class CeleryConfig:
 
 CELERY_CONFIG = CeleryConfig
 
-FEATURE_FLAGS = {"ALERT_REPORTS": True}
+FEATURE_FLAGS = {"HORIZONTAL_FILTER_BAR": True,"ENABLE_TEMPLATE_PROCESSING": True,"ALERT_REPORTS": True,"EMBEDDED_SUPERSET": True}
 ALERT_REPORTS_NOTIFICATION_DRY_RUN = True
 WEBDRIVER_BASEURL = "http://superset:8088/"
 # The base URL for the email report hyperlinks.
@@ -120,3 +120,27 @@ try:
     )
 except ImportError:
     logger.info("Using default Docker config...")
+
+PUBLIC_ROLE_LIKE = 'Gamma-Copy'
+WTF_CSRF_ENABLED = False
+
+PROXY_FIX_CONFIG = {"x_for": 1, "x_proto": 1, "x_host": 1, "x_port": 1, "x_prefix": 1}
+ENABLE_PROXY_FIX = True
+HTTP_HEADERS = {'X-Frame-Options': 'ALLOWALL'}
+ENABLE_CORS = True
+CORS_OPTIONS = {
+	'supports_credentials': True,
+	'allow_headers': ['*'],
+	'resources':['*'],
+	'origins': ['*']
+}
+
+BABEL_DEFAULT_LOCALE = 'zh'
+BABEL_DEFAULT_FOLDER = 'superset/translations'
+
+LANGUAGES = {
+    'en': {'flag': 'us', 'name': 'English'},
+    'zh': {'flag': 'cn', 'name': 'Chinese'}
+}
+
+APP_ICON = "/static/assets/images/simpo-analytics-logo.png"
