@@ -10123,7 +10123,7 @@ msgid "One or more parameters needed to configure a database are missing."
 msgstr ""
 
 #: superset/errors.py:133
-msgid "One or more parameters specified in the query are malformatted."
+msgid "One or more parameters specified in the query are malformed."
 msgstr ""
 
 #: superset/errors.py:107
@@ -14727,7 +14727,7 @@ msgstr ""
 #, python-format
 msgid ""
 "The number of results displayed is limited to %(rows)d by the "
-"configuration DISPLAY_MAX_ROWS. Please add additional limits/filters or "
+"configuration DISPLAY_MAX_ROW. Please add additional limits/filters or "
 "download to CSV to see more rows up to the %(limit)d limit."
 msgstr ""
 

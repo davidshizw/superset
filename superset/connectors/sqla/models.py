@@ -74,12 +74,10 @@ from superset import app, db, is_feature_enabled, security_manager
 from superset.common.db_query_status import QueryStatus
 from superset.connectors.base.models import BaseColumn, BaseDatasource, BaseMetric
 from superset.connectors.sqla.utils import (
-    find_cached_objects_in_session,
     get_columns_description,
     get_physical_table_metadata,
     get_virtual_table_metadata,
 )
-from superset.datasets.models import Dataset as NewDataset
 from superset.db_engine_specs.base import BaseEngineSpec, TimestampExpression
 from superset.exceptions import (
     ColumnNotFoundException,
@@ -105,7 +103,13 @@ from superset.models.helpers import (
     validate_adhoc_subquery,
 )
 from superset.sql_parse import ParsedQuery, sanitize_clause
-from superset.superset_typing import AdhocColumn, AdhocMetric, Metric, QueryObjectDict
+from superset.superset_typing import (
+    AdhocColumn,
+    AdhocMetric,
+    Metric,
+    QueryObjectDict,
+    ResultSetColumnType,
+)
 from superset.utils import core as utils
 from superset.utils.core import GenericDataType, MediumText
 
@@ -190,7 +194,7 @@ class TableColumn(Model, BaseColumn, CertificationMixin):
 
     __tablename__ = "table_columns"
     __table_args__ = (UniqueConstraint("table_id", "column_name"),)
-    table_id = Column(Integer, ForeignKey("tables.id"))
+    table_id = Column(Integer, ForeignKey("tables.id", ondelete="CASCADE"))
     table: Mapped[SqlaTable] = relationship(
         "SqlaTable",
         back_populates="columns",
@@ -223,7 +227,7 @@ class TableColumn(Model, BaseColumn, CertificationMixin):
         """
         Construct a TableColumn object.
 
-        Historically a TableColumn object (from an ORM perspective) was tighly bound to
+        Historically a TableColumn object (from an ORM perspective) was tightly bound to
         a SqlaTable object, however with the introduction of the Query datasource this
         is no longer true, i.e., the SqlaTable relationship is optional.
 
@@ -294,7 +298,7 @@ class TableColumn(Model, BaseColumn, CertificationMixin):
             return GenericDataType.TEMPORAL
 
         return (
-            column_spec.generic_type  # pylint: disable=used-before-assignment
+            column_spec.generic_type
             if (
                 column_spec := self.db_engine_spec.get_column_spec(
                     self.type,
@@ -394,7 +398,7 @@ class SqlMetric(Model, BaseMetric, CertificationMixin):
 
     __tablename__ = "sql_metrics"
     __table_args__ = (UniqueConstraint("table_id", "metric_name"),)
-    table_id = Column(Integer, ForeignKey("tables.id"))
+    table_id = Column(Integer, ForeignKey("tables.id", ondelete="CASCADE"))
     table: Mapped[SqlaTable] = relationship(
         "SqlaTable",
         back_populates="metrics",
@@ -410,6 +414,7 @@ class SqlMetric(Model, BaseMetric, CertificationMixin):
         "expression",
         "description",
         "d3format",
+        "currency",
         "extra",
         "warning_text",
     ]
@@ -463,8 +468,8 @@ sqlatable_user = Table(
     "sqlatable_user",
     metadata,
     Column("id", Integer, primary_key=True),
-    Column("user_id", Integer, ForeignKey("ab_user.id")),
-    Column("table_id", Integer, ForeignKey("tables.id")),
+    Column("user_id", Integer, ForeignKey("ab_user.id", ondelete="CASCADE")),
+    Column("table_id", Integer, ForeignKey("tables.id", ondelete="CASCADE")),
 )
 
 
@@ -501,11 +506,13 @@ class SqlaTable(
         TableColumn,
         back_populates="table",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     metrics: Mapped[list[SqlMetric]] = relationship(
         SqlMetric,
         back_populates="table",
         cascade="all, delete-orphan",
+        passive_deletes=True,
     )
     metric_class = SqlMetric
     column_class = TableColumn
@@ -537,6 +544,8 @@ class SqlaTable(
     is_sqllab_view = Column(Boolean, default=False)
     template_params = Column(Text)
     extra = Column(Text)
+    normalize_columns = Column(Boolean, default=False)
+    always_filter_main_dttm = Column(Boolean, default=False)
 
     baselink = "tablemodelview"
 
@@ -555,6 +564,8 @@ class SqlaTable(
         "filter_select_enabled",
         "fetch_values_predicate",
         "extra",
+        "normalize_columns",
+        "always_filter_main_dttm",
     ]
     update_from_object_fields = [f for f in export_fields if f != "database_id"]
     export_parent = "database"
@@ -700,14 +711,15 @@ class SqlaTable(
     def sql_url(self) -> str:
         return self.database.sql_url + "?table_name=" + str(self.table_name)
 
-    def external_metadata(self) -> list[dict[str, str]]:
+    def external_metadata(self) -> list[ResultSetColumnType]:
         # todo(yongjie): create a physical table column type in a separate PR
         if self.sql:
-            return get_virtual_table_metadata(dataset=self)  # type: ignore
+            return get_virtual_table_metadata(dataset=self)
         return get_physical_table_metadata(
             database=self.database,
             table_name=self.table_name,
             schema_name=self.schema,
+            normalize_columns=self.normalize_columns,
         )
 
     @property
@@ -751,6 +763,8 @@ class SqlaTable(
             data_["health_check_message"] = self.health_check_message
             data_["extra"] = self.extra
             data_["owners"] = self.owners_data
+            data_["always_filter_main_dttm"] = self.always_filter_main_dttm
+            data_["normalize_columns"] = self.normalize_columns
         return data_
 
     @property
@@ -981,11 +995,13 @@ class SqlaTable(
         time_grain = col.get("timeGrain")
         has_timegrain = col.get("columnType") == "BASE_AXIS" and time_grain
         is_dttm = False
+        pdf = None
         if col_in_metadata := self.get_column(expression):
             sqla_column = col_in_metadata.get_sqla_col(
                 template_processor=template_processor
             )
             is_dttm = col_in_metadata.is_temporal
+            pdf = col_in_metadata.python_date_format
         else:
             sqla_column = literal_column(expression)
             if has_timegrain or force_type_check:
@@ -994,15 +1010,17 @@ class SqlaTable(
                     tbl, _ = self.get_from_clause(template_processor)
                     qry = sa.select([sqla_column]).limit(1).select_from(tbl)
                     sql = self.database.compile_sqla_query(qry)
-                    col_desc = get_columns_description(self.database, sql)
-                    is_dttm = col_desc[0]["is_dttm"]
+                    col_desc = get_columns_description(self.database, self.schema, sql)
+                    if not col_desc:
+                        raise SupersetGenericDBErrorException("Column not found")
+                    is_dttm = col_desc[0]["is_dttm"]  # type: ignore
                 except SupersetGenericDBErrorException as ex:
                     raise ColumnNotFoundException(message=str(ex)) from ex
 
         if is_dttm and has_timegrain:
             sqla_column = self.db_engine_spec.get_timestamp_expr(
                 col=sqla_column,
-                pdf=None,
+                pdf=pdf,
                 time_grain=time_grain,
             )
         return self.make_sqla_column_compatible(sqla_column, label)
@@ -1260,18 +1278,18 @@ class SqlaTable(
             removed=[
                 col
                 for col in old_columns_by_name
-                if col not in {col["name"] for col in new_columns}
+                if col not in {col["column_name"] for col in new_columns}
             ]
         )
 
         # clear old columns before adding modified columns back
         columns = []
         for col in new_columns:
-            old_column = old_columns_by_name.pop(col["name"], None)
+            old_column = old_columns_by_name.pop(col["column_name"], None)
             if not old_column:
-                results.added.append(col["name"])
+                results.added.append(col["column_name"])
                 new_column = TableColumn(
-                    column_name=col["name"],
+                    column_name=col["column_name"],
                     type=col["type"],
                     table=self,
                 )
@@ -1280,14 +1298,14 @@ class SqlaTable(
             else:
                 new_column = old_column
                 if new_column.type != col["type"]:
-                    results.modified.append(col["name"])
+                    results.modified.append(col["column_name"])
                 new_column.type = col["type"]
                 new_column.expression = ""
             new_column.groupby = True
             new_column.filterable = True
             columns.append(new_column)
             if not any_date_col and new_column.is_temporal:
-                any_date_col = col["name"]
+                any_date_col = col["column_name"]
 
         # add back calculated (virtual) columns
         columns.extend([col for col in old_columns if col.expression])
@@ -1418,44 +1436,20 @@ class SqlaTable(
 
     @staticmethod
     def before_update(
-        mapper: Mapper,  # pylint: disable=unused-argument
-        connection: Connection,  # pylint: disable=unused-argument
+        mapper: Mapper,
+        connection: Connection,
         target: SqlaTable,
     ) -> None:
         """
-        Check before update if the target table already exists.
-
-        Note this listener is called when any fields are being updated and thus it is
-        necessary to first check whether the reference table is being updated.
-
-        Note this logic is temporary, given uniqueness is handled via the dataset DAO,
-        but is necessary until both the legacy datasource editor and datasource/save
-        endpoints are deprecated.
+        Note this listener is called when any fields are being updated
 
         :param mapper: The table mapper
         :param connection: The DB-API connection
         :param target: The mapped instance being persisted
         :raises Exception: If the target table is not unique
         """
-
-        # pylint: disable=import-outside-toplevel
-        from superset.datasets.commands.exceptions import get_dataset_exist_error_msg
-        from superset.datasets.dao import DatasetDAO
-
-        # Check whether the relevant attributes have changed.
-        state = db.inspect(target)  # pylint: disable=no-member
-
-        for attr in ["database_id", "schema", "table_name"]:
-            history = state.get_history(attr, True)
-            if history.has_changes():
-                break
-        else:
-            return None
-
-        if not DatasetDAO.validate_uniqueness(
-            target.database_id, target.schema, target.table_name, target.id
-        ):
-            raise Exception(get_dataset_exist_error_msg(target.full_name))
+        target.load_database()
+        security_manager.dataset_before_update(mapper, connection, target)
 
     @staticmethod
     def update_column(  # pylint: disable=unused-argument
@@ -1473,34 +1467,17 @@ class SqlaTable(
         # table is updated. This busts the cache key for all charts that use the table.
         session.execute(update(SqlaTable).where(SqlaTable.id == target.table.id))
 
-        # TODO: This shadow writing is deprecated
-        # if table itself has changed, shadow-writing will happen in `after_update` anyway
-        if target.table not in session.dirty:
-            dataset: NewDataset = (
-                session.query(NewDataset)
-                .filter_by(uuid=target.table.uuid)
-                .one_or_none()
-            )
-            # Update shadow dataset and columns
-            # did we find the dataset?
-            if not dataset:
-                # if dataset is not found create a new copy
-                target.table.write_shadow_dataset()
-                return
-
     @staticmethod
     def after_insert(
         mapper: Mapper,
         connection: Connection,
-        sqla_table: SqlaTable,
+        target: SqlaTable,
     ) -> None:
         """
         Update dataset permissions after insert
         """
-        security_manager.dataset_after_insert(mapper, connection, sqla_table)
-
-        # TODO: deprecated
-        sqla_table.write_shadow_dataset()
+        target.load_database()
+        security_manager.dataset_after_insert(mapper, connection, target)
 
     @staticmethod
     def after_delete(
@@ -1513,63 +1490,16 @@ class SqlaTable(
         """
         security_manager.dataset_after_delete(mapper, connection, sqla_table)
 
-    @staticmethod
-    def after_update(
-        mapper: Mapper,
-        connection: Connection,
-        sqla_table: SqlaTable,
-    ) -> None:
-        """
-        Update dataset permissions
-        """
-        # set permissions
-        security_manager.dataset_after_update(mapper, connection, sqla_table)
-
-        # TODO: the shadow writing is deprecated
-        inspector = inspect(sqla_table)
-        session = inspector.session
-
-        # double-check that ``UPDATE``s are actually pending (this method is called even
-        # for instances that have no net changes to their column-based attributes)
-        if not session.is_modified(sqla_table, include_collections=True):
-            return
-
-        # find the dataset from the known instance list first
-        # (it could be either from a previous query or newly created)
-        dataset = next(
-            find_cached_objects_in_session(
-                session, NewDataset, uuids=[sqla_table.uuid]
-            ),
-            None,
-        )
-        # if not found, pull from database
-        if not dataset:
-            dataset = (
-                session.query(NewDataset).filter_by(uuid=sqla_table.uuid).one_or_none()
-            )
-        if not dataset:
-            sqla_table.write_shadow_dataset()
-            return
-
-    def write_shadow_dataset(
-        self: SqlaTable,
-    ) -> None:
-        """
-        This method is deprecated
-        """
-        session = inspect(self).session
-        # most of the write_shadow_dataset functionality has been removed
-        # but leaving this portion in
-        # to remove later because it is adding a Database relationship to the session
-        # and there is some functionality that depends on this
+    def load_database(self: SqlaTable) -> None:
+        # somehow the database attribute is not loaded on access
         if self.database_id and (
             not self.database or self.database.id != self.database_id
         ):
+            session = inspect(self).session
             self.database = session.query(Database).filter_by(id=self.database_id).one()
 
 
 sa.event.listen(SqlaTable, "before_update", SqlaTable.before_update)
-sa.event.listen(SqlaTable, "after_update", SqlaTable.after_update)
 sa.event.listen(SqlaTable, "after_insert", SqlaTable.after_insert)
 sa.event.listen(SqlaTable, "after_delete", SqlaTable.after_delete)
 sa.event.listen(SqlMetric, "after_update", SqlaTable.update_column)

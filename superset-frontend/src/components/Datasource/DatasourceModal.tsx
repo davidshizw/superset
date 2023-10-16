@@ -19,14 +19,25 @@
 import React, { FunctionComponent, useState, useRef } from 'react';
 import Alert from 'src/components/Alert';
 import Button from 'src/components/Button';
-import { FeatureFlag, styled, SupersetClient, t } from '@superset-ui/core';
+import {
+  FeatureFlag,
+  isDefined,
+  isFeatureEnabled,
+  Metric,
+  styled,
+  SupersetClient,
+  t,
+} from '@superset-ui/core';
 
 import Modal from 'src/components/Modal';
 import AsyncEsmComponent from 'src/components/AsyncEsmComponent';
-import { isFeatureEnabled } from 'src/featureFlags';
-
-import { getClientErrorObject } from 'src/utils/getClientErrorObject';
+import {
+  genericSupersetError,
+  SupersetError,
+} from 'src/components/ErrorMessage/types';
+import ErrorMessageWithStackTrace from 'src/components/ErrorMessage/ErrorMessageWithStackTrace';
 import withToasts from 'src/components/MessageToasts/withToasts';
+import { useSelector } from 'react-redux';
 
 const DatasourceEditor = AsyncEsmComponent(() => import('./DatasourceEditor'));
 
@@ -81,7 +92,21 @@ const DatasourceModal: FunctionComponent<DatasourceModalProps> = ({
   onHide,
   show,
 }) => {
-  const [currentDatasource, setCurrentDatasource] = useState(datasource);
+  const [currentDatasource, setCurrentDatasource] = useState({
+    ...datasource,
+    metrics: datasource?.metrics?.map((metric: Metric) => ({
+      ...metric,
+      currency: JSON.parse(metric.currency || 'null'),
+    })),
+  });
+  const currencies = useSelector<
+    {
+      common: {
+        currencies: string[];
+      };
+    },
+    string[]
+  >(state => state.common?.currencies);
   const [errors, setErrors] = useState<any[]>([]);
   const [isSaving, setIsSaving] = useState(false);
   const [isEditing, setIsEditing] = useState<boolean>(false);
@@ -107,6 +132,8 @@ const DatasourceModal: FunctionComponent<DatasourceModalProps> = ({
         schema,
         description: currentDatasource.description,
         main_dttm_col: currentDatasource.main_dttm_col,
+        normalize_columns: currentDatasource.normalize_columns,
+        always_filter_main_dttm: currentDatasource.always_filter_main_dttm,
         offset: currentDatasource.offset,
         default_endpoint: currentDatasource.default_endpoint,
         cache_timeout:
@@ -125,7 +152,10 @@ const DatasourceModal: FunctionComponent<DatasourceModalProps> = ({
               description: metric.description,
               metric_name: metric.metric_name,
               metric_type: metric.metric_type,
-              d3format: metric.d3format,
+              d3format: metric.d3format || null,
+              currency: !isDefined(metric.currency)
+                ? null
+                : JSON.stringify(metric.currency),
               verbose_name: metric.verbose_name,
               warning_text: metric.warning_text,
               uuid: metric.uuid,
@@ -177,11 +207,18 @@ const DatasourceModal: FunctionComponent<DatasourceModalProps> = ({
       })
       .catch(response => {
         setIsSaving(false);
-        getClientErrorObject(response).then(({ error }) => {
+        response.json().then((errorJson: { errors: SupersetError[] }) => {
           modal.error({
-            title: t('Error'),
-            content: error || t('An error has occurred'),
+            title: t('Error saving dataset'),
             okButtonProps: { danger: true, className: 'btn-danger' },
+            content: (
+              <ErrorMessageWithStackTrace
+                error={
+                  errorJson?.errors?.[0] || genericSupersetError(errorJson)
+                }
+                source="crud"
+              />
+            ),
           });
         });
       });
@@ -297,6 +334,7 @@ const DatasourceModal: FunctionComponent<DatasourceModalProps> = ({
         datasource={currentDatasource}
         onChange={onDatasourceChange}
         setIsEditing={setIsEditing}
+        currencies={currencies}
       />
       {contextHolder}
     </StyledDatasourceModal>

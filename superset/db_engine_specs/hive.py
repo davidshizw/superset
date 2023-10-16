@@ -46,6 +46,7 @@ from superset.exceptions import SupersetException
 from superset.extensions import cache_manager
 from superset.models.sql_lab import Query
 from superset.sql_parse import ParsedQuery, Table
+from superset.superset_typing import ResultSetColumnType
 
 if TYPE_CHECKING:
     # prevent circular imports
@@ -75,7 +76,7 @@ def upload_to_s3(filename: str, upload_prefix: str, table: Table) -> str:
 
     if not bucket_path:
         logger.info("No upload bucket specified")
-        raise Exception(
+        raise Exception(  # pylint: disable=broad-exception-raised
             "No upload bucket specified. You can specify one in the config file."
         )
 
@@ -148,7 +149,6 @@ class HiveEngineSpec(PrestoEngineSpec):
         hive.TCLIService = patched_TCLIService
         hive.constants = patched_constants
         hive.ttypes = patched_ttypes
-        hive.Cursor.fetch_logs = fetch_logs
 
     @classmethod
     def fetch_data(cls, cursor: Any, limit: int | None = None) -> list[tuple[Any, ...]]:
@@ -158,7 +158,9 @@ class HiveEngineSpec(PrestoEngineSpec):
 
         state = cursor.poll()
         if state.operationState == ttypes.TOperationState.ERROR_STATE:
-            raise Exception("Query error", state.errorMessage)
+            raise Exception(  # pylint: disable=broad-exception-raised
+                "Query error", state.errorMessage
+            )
         try:
             return super().fetch_data(cursor, limit)
         except pyhive.exc.ProgrammingError:
@@ -311,9 +313,10 @@ class HiveEngineSpec(PrestoEngineSpec):
                 reduce_progress = int(match.groupdict()["reduce_progress"])
                 stages[stage_number] = (map_progress + reduce_progress) / 2
         logger.info(
-            "Progress detail: {}, "  # pylint: disable=logging-format-interpolation
-            "current job {}, "
-            "total jobs: {}".format(stages, current_job, total_jobs)
+            "Progress detail: %s, current job %s, total jobs: %s",
+            stages,
+            current_job,
+            total_jobs,
         )
 
         stage_progress = sum(stages.values()) / len(stages.values()) if stages else 0
@@ -357,7 +360,8 @@ class HiveEngineSpec(PrestoEngineSpec):
                 break
 
             try:
-                log = cursor.fetch_logs() or ""
+                logs = cursor.fetch_logs()
+                log = "\n".join(logs) if logs else ""
             except Exception:  # pylint: disable=broad-except
                 logger.warning("Call to GetLog() failed")
                 log = ""
@@ -407,8 +411,8 @@ class HiveEngineSpec(PrestoEngineSpec):
     @classmethod
     def get_columns(
         cls, inspector: Inspector, table_name: str, schema: str | None
-    ) -> list[dict[str, Any]]:
-        return inspector.get_columns(table_name, schema)
+    ) -> list[ResultSetColumnType]:
+        return BaseEngineSpec.get_columns(inspector, table_name, schema)
 
     @classmethod
     def where_latest_partition(  # pylint: disable=too-many-arguments
@@ -417,7 +421,7 @@ class HiveEngineSpec(PrestoEngineSpec):
         schema: str | None,
         database: Database,
         query: Select,
-        columns: list[dict[str, Any]] | None = None,
+        columns: list[ResultSetColumnType] | None = None,
     ) -> Select | None:
         try:
             col_names, values = cls.latest_partition(
@@ -436,7 +440,7 @@ class HiveEngineSpec(PrestoEngineSpec):
         return None
 
     @classmethod
-    def _get_fields(cls, cols: list[dict[str, Any]]) -> list[ColumnClause]:
+    def _get_fields(cls, cols: list[ResultSetColumnType]) -> list[ColumnClause]:
         return BaseEngineSpec._get_fields(cols)  # pylint: disable=protected-access
 
     @classmethod
@@ -481,11 +485,9 @@ class HiveEngineSpec(PrestoEngineSpec):
         show_cols: bool = False,
         indent: bool = True,
         latest_partition: bool = True,
-        cols: list[dict[str, Any]] | None = None,
+        cols: list[ResultSetColumnType] | None = None,
     ) -> str:
-        return super(  # pylint: disable=bad-super-call
-            PrestoEngineSpec, cls
-        ).select_star(
+        return super(PrestoEngineSpec, cls).select_star(
             database,
             table_name,
             engine,
@@ -630,50 +632,3 @@ class HiveEngineSpec(PrestoEngineSpec):
             cursor.execute(sql)
             results = cursor.fetchall()
             return {row[0] for row in results}
-
-
-# TODO: contribute back to pyhive.
-def fetch_logs(  # pylint: disable=protected-access
-    self: Cursor,
-    _max_rows: int = 1024,
-    orientation: TFetchOrientation | None = None,
-) -> str:
-    """Mocked. Retrieve the logs produced by the execution of the query.
-    Can be called multiple times to fetch the logs produced after
-    the previous call.
-    :returns: list<str>
-    :raises: ``ProgrammingError`` when no query has been started
-    .. note::
-        This is not a part of DB-API.
-    """
-    # pylint: disable=import-outside-toplevel
-    from pyhive import hive
-    from TCLIService import ttypes
-    from thrift import Thrift
-
-    orientation = orientation or ttypes.TFetchOrientation.FETCH_NEXT
-    try:
-        req = ttypes.TGetLogReq(operationHandle=self._operationHandle)
-        logs = self._connection.client.GetLog(req).log
-        return logs
-    # raised if Hive is used
-    except (ttypes.TApplicationException, Thrift.TApplicationException) as ex:
-        if self._state == self._STATE_NONE:
-            raise hive.ProgrammingError("No query yet") from ex
-        logs = []
-        while True:
-            req = ttypes.TFetchResultsReq(
-                operationHandle=self._operationHandle,
-                orientation=ttypes.TFetchOrientation.FETCH_NEXT,
-                maxRows=self.arraysize,
-                fetchType=1,  # 0: results, 1: logs
-            )
-            response = self._connection.client.FetchResults(req)
-            hive._check_status(response)
-            assert not response.results.rows, "expected data in columnar format"
-            assert len(response.results.columns) == 1, response.results.columns
-            new_logs = hive._unwrap_column(response.results.columns[0])
-            logs += new_logs
-            if not new_logs:
-                break
-        return "\n".join(logs)
