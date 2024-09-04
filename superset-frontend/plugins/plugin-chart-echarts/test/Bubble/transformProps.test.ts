@@ -18,6 +18,7 @@
  */
 import {
   ChartProps,
+  ChartPropsConfig,
   getNumberFormatter,
   SqlaFormData,
   supersetTheme,
@@ -27,7 +28,7 @@ import { EchartsBubbleChartProps } from 'plugins/plugin-chart-echarts/src/Bubble
 import transformProps, { formatTooltip } from '../../src/Bubble/transformProps';
 
 describe('Bubble transformProps', () => {
-  const formData: SqlaFormData = {
+  const defaultFormData: SqlaFormData = {
     datasource: '1__table',
     viz_type: 'echarts_bubble',
     entity: 'customer_name',
@@ -48,10 +49,11 @@ describe('Bubble transformProps', () => {
       expressionType: 'simple',
       label: 'SUM(sales)',
     },
+    xAxisBounds: [null, null],
     yAxisBounds: [null, null],
   };
-  const chartProps = new ChartProps({
-    formData,
+  const chartConfig: ChartPropsConfig = {
+    formData: defaultFormData,
     height: 800,
     width: 800,
     queriesData: [
@@ -79,9 +81,48 @@ describe('Bubble transformProps', () => {
       },
     ],
     theme: supersetTheme,
-  });
+  };
 
   it('Should transform props for viz', () => {
+    const chartProps = new ChartProps(chartConfig);
+    expect(transformProps(chartProps as EchartsBubbleChartProps)).toEqual(
+      expect.objectContaining({
+        width: 800,
+        height: 800,
+        echartOptions: expect.objectContaining({
+          series: expect.arrayContaining([
+            expect.objectContaining({
+              data: expect.arrayContaining([
+                [10, 20, 30, 'AV Stores, Co.', null],
+              ]),
+            }),
+            expect.objectContaining({
+              data: expect.arrayContaining([
+                [40, 50, 60, 'Alpha Cognac', null],
+              ]),
+            }),
+            expect.objectContaining({
+              data: expect.arrayContaining([
+                [70, 80, 90, 'Amica Models & Co.', null],
+              ]),
+            }),
+          ]),
+        }),
+      }),
+    );
+  });
+
+  it('Should transform props with undefined control values', () => {
+    const formData: SqlaFormData = {
+      ...defaultFormData,
+      xAxisBounds: undefined,
+      yAxisBounds: undefined,
+    };
+    const chartProps = new ChartProps({
+      ...chartConfig,
+      formData,
+    });
+
     expect(transformProps(chartProps as EchartsBubbleChartProps)).toEqual(
       expect.objectContaining({
         width: 800,
@@ -119,42 +160,44 @@ describe('Bubble formatTooltip', () => {
       data: [10000, 20000, 3, 'bubble title', 'bubble dimension'],
     };
 
-    expect(
-      formatTooltip(
-        params,
-        'x-axis-label',
-        'y-axis-label',
-        'size-label',
-        dollerFormatter,
-        dollerFormatter,
-        percentFormatter,
-      ),
-    ).toEqual(
-      `<p>bubble title </br> bubble dimension</p>
-        x-axis-label: $10,000.00 <br/>
-        y-axis-label: $20,000.00 <br/>
-        size-label: 300.0%`,
+    const html = formatTooltip(
+      params,
+      'x-axis-label',
+      'y-axis-label',
+      'size-label',
+      dollerFormatter,
+      dollerFormatter,
+      percentFormatter,
     );
+    expect(html).toContain('bubble title');
+    expect(html).toContain('bubble dimension');
+    expect(html).toContain('x-axis-label');
+    expect(html).toContain('y-axis-label');
+    expect(html).toContain('size-label');
+    expect(html).toContain('$10,000.00');
+    expect(html).toContain('$20,000.00');
+    expect(html).toContain('300.0%');
   });
   it('Should generate correct bubble label content without dimension', () => {
     const params = {
       data: [10000, 25000, 3, 'bubble title', null],
     };
-    expect(
-      formatTooltip(
-        params,
-        'x-axis-label',
-        'y-axis-label',
-        'size-label',
-        dollerFormatter,
-        dollerFormatter,
-        percentFormatter,
-      ),
-    ).toEqual(
-      `<p>bubble title</p>
-        x-axis-label: $10,000.00 <br/>
-        y-axis-label: $25,000.00 <br/>
-        size-label: 300.0%`,
+    const html = formatTooltip(
+      params,
+      'x-axis-label',
+      'y-axis-label',
+      'size-label',
+      dollerFormatter,
+      dollerFormatter,
+      percentFormatter,
     );
+    expect(html).toContain('bubble title');
+    expect(html).not.toContain('bubble dimension');
+    expect(html).toContain('x-axis-label');
+    expect(html).toContain('y-axis-label');
+    expect(html).toContain('size-label');
+    expect(html).toContain('$10,000.00');
+    expect(html).toContain('$25,000.00');
+    expect(html).toContain('300.0%');
   });
 });

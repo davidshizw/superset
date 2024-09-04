@@ -16,10 +16,8 @@
  * specific language governing permissions and limitations
  * under the License.
  */
-import React from 'react';
-import FilterableTable, {
-  convertBigIntStrToNumber,
-} from 'src/components/FilterableTable';
+import { isValidElement } from 'react';
+import FilterableTable from 'src/components/FilterableTable';
 import { render, screen, within } from 'spec/helpers/testing-library';
 import userEvent from '@testing-library/user-event';
 
@@ -34,9 +32,7 @@ describe('FilterableTable', () => {
     height: 500,
   };
   it('is valid element', () => {
-    expect(React.isValidElement(<FilterableTable {...mockedProps} />)).toBe(
-      true,
-    );
+    expect(isValidElement(<FilterableTable {...mockedProps} />)).toBe(true);
   });
   it('renders a grid with 3 Table rows', () => {
     const { getByRole, getByText } = render(
@@ -382,20 +378,4 @@ describe('FilterableTable sorting - RTL', () => {
       ].join(''),
     );
   });
-});
-
-test('renders bigInt value in a number format', () => {
-  expect(convertBigIntStrToNumber('123')).toBe('123');
-  expect(convertBigIntStrToNumber('some string value')).toBe(
-    'some string value',
-  );
-  expect(convertBigIntStrToNumber('{ a: 123 }')).toBe('{ a: 123 }');
-  expect(convertBigIntStrToNumber('"Not a Number"')).toBe('"Not a Number"');
-  // trim quotes for bigint string format
-  expect(convertBigIntStrToNumber('"-12345678901234567890"')).toBe(
-    '-12345678901234567890',
-  );
-  expect(convertBigIntStrToNumber('"12345678901234567890"')).toBe(
-    '12345678901234567890',
-  );
 });
